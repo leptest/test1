@@ -14,40 +14,71 @@ them up.
 
 No `pip install`. No venv. No dependencies.
 
-## Quick start
+## Quick start — interactive TUI
+
+Just run it with no arguments:
 
 ```sh
-# 1. Point the toolkit at your projects folder
-#    Edit projtool.config.json and set "roots": ["/path/to/your/projects"]
+python projtool.py
+```
 
-# 2. Inventory everything (read-only)
-python projtool.py scan
+That drops you into a full-screen interactive TUI (Unicode boxes, color,
+tables). On the first run it detects that you haven't configured any roots
+yet and walks you through adding one, then brings you to a menu where you
+can scan, browse, run health checks, check deps, tidy, tag, and open the
+HTML dashboard. Everything destructive still stays dry-run until you
+explicitly opt in.
 
-# 3. Render reports
-python projtool.py report
-#    -> out/inventory.json
-#    -> out/inventory.md
-#    -> out/dashboard.html    <- open this in a browser
+```
+╭─ status ──────────────────────────────────────────────────────╮
+│ roots: /home/you/projects                                     │
+│ inventory: 64 projects  (game 12 · website 18 · service 8 …)  │
+│ stacks: node 38 · python 9 · cpp 3 · rust 2 · static-web 6    │
+│ health: 31 ok · 12 fail · 21 skipped  (16/64 projects checked)│
+╰───────────────────────────────────────────────────────────────╯
 
-# 4. (Optional) check health — dry-run by default
-python projtool.py health            # prints the plan
-python projtool.py health --run      # actually runs install/build/test/lint
+  1) Configure project roots
+  2) Scan projects (read-only)
+  3) Browse inventory (table view)
+  4) Render inventory.md + dashboard.html
+  5) Run health checks (install/build/test/lint)
+  6) Check outdated dependencies
+  7) Flag archival candidates
+  8) Tag a project
+  9) Open HTML dashboard in browser
+  q) Quit
+```
 
-# 5. (Optional) check outdated dependencies
-python projtool.py deps
+The browse view paginates 20 projects at a time, supports
+category filtering (`f`), free-text search (`/`), sort by last commit,
+and per-row detail cards.
 
-# 6. (Optional) flag dead projects for archival
-python projtool.py tidy              # dry-run
-python projtool.py tidy --apply      # moves flagged projects to _archive/
+## Quick start — direct subcommands
+
+Everything the TUI does is also available non-interactively:
+
+```sh
+python projtool.py scan              # read-only inventory
+python projtool.py report            # inventory.md + dashboard.html
+python projtool.py health [--run]    # dry-run or actually execute
+python projtool.py deps              # outdated deps
+python projtool.py tidy [--apply]    # archival candidates
+python projtool.py tag <name> <tags...>
+python projtool.py tui               # same as no args
 ```
 
 On Windows use `python projtool.py ...` or the `bin\projtool.cmd` wrapper.
 On Linux/macOS you can also use `bin/projtool ...`.
 
+On Windows 10+, the TUI enables ANSI escape processing automatically
+(via `os.system("")`). If you're on an ancient console, colors may show
+as raw escape codes — use the classic subcommands instead.
+
 ## Subcommands
 
 | Command | What it does |
 |---|---|
+| `tui` | Interactive full-screen menu (default when run with no args). Walks you through setup on first run and exposes every other command. |
 | `scan` | Walks each configured root, detects stack/category/git info, writes `out/inventory.json`. Pure read-only. |
 | `report` | Renders `inventory.json` into `inventory.md` and a single-file `dashboard.html` (sortable, filterable, no external assets). |
 | `health [name] [--run]` | For each project, runs install/build/test/lint for its detected stack. Prints the plan without `--run`; actually executes with `--run`. Captures output to `out/health/<name>.log`. |

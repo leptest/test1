@@ -19,10 +19,20 @@
   ],
   "archive_after_days": 730,
   "overrides": {
-    "_bitbucket": { "category": "meta" },
-    "_bruno": { "category": "meta" },
-    "_design-files": { "category": "meta" },
-    "_other": { "category": "meta" },
-    "_WEBSITES": { "category": "meta" }
+    "_bitbucket": {
+      "category": "meta"
+    },
+    "_bruno": {
+      "category": "meta"
+    },
+    "_design-files": {
+      "category": "meta"
+    },
+    "_other": {
+      "category": "meta"
+    },
+    "_WEBSITES": {
+      "category": "meta"
+    }
   }
 }

@@ -803,11 +803,724 @@ def cmd_report(args: argparse.Namespace) -> None:
     print(f"wrote {HTML_PATH}")
 
 
+# --------------------------------------------------------------------------- #
+#  TUI
+# --------------------------------------------------------------------------- #
+
+ANSI = {
+    "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m",
+    "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m",
+    "blue": "\033[34m", "magenta": "\033[35m", "cyan": "\033[36m",
+    "grey": "\033[90m", "bgblue": "\033[44m",
+}
+
+
+def ansi_enable_windows() -> None:
+    """On Windows 10+, flip the console into VT processing mode."""
+    if os.name == "nt":
+        # Triggers ENABLE_VIRTUAL_TERMINAL_PROCESSING via cmd.exe
+        os.system("")
+
+
+def c(text: str, *codes: str) -> str:
+    return "".join(ANSI.get(k, "") for k in codes) + text + ANSI["reset"]
+
+
+def term_size() -> tuple[int, int]:
+    size = shutil.get_terminal_size(fallback=(100, 30))
+    return max(60, size.columns), max(15, size.lines)
+
+
+def clear() -> None:
+    sys.stdout.write("\033[2J\033[H")
+    sys.stdout.flush()
+
+
+def strip_ansi(text: str) -> str:
+    import re
+    return re.sub(r"\033\[[0-9;]*m", "", text)
+
+
+def visible_len(text: str) -> int:
+    return len(strip_ansi(text))
+
+
+def pad(text: str, width: int, align: str = "left") -> str:
+    pad_n = max(0, width - visible_len(text))
+    if align == "right":
+        return " " * pad_n + text
+    if align == "center":
+        left = pad_n // 2
+        return " " * left + text + " " * (pad_n - left)
+    return text + " " * pad_n
+
+
+def truncate(text: str, width: int) -> str:
+    if visible_len(text) <= width:
+        return text
+    # Stripping ANSI for truncation; TUI table cells don't carry ANSI through here.
+    plain = strip_ansi(text)
+    if width <= 1:
+        return plain[:width]
+    return plain[: width - 1] + "…"
+
+
+def box(title: str, lines: list[str], width: int) -> list[str]:
+    top = "╭─ " + title + " " + "─" * max(0, width - 4 - len(title)) + "╮"
+    bot = "╰" + "─" * (width - 2) + "╯"
+    out = [c(top, "cyan")]
+    for line in lines:
+        content = truncate(line, width - 4)
+        out.append(c("│ ", "cyan") + pad(content, width - 4) + c(" │", "cyan"))
+    out.append(c(bot, "cyan"))
+    return out
+
+
+def table(headers: list[str], rows: list[list[str]], widths: list[int]) -> list[str]:
+    """Render a simple table with Unicode separators."""
+    def sep(left: str, mid: str, right: str, fill: str) -> str:
+        parts = [fill * (w + 2) for w in widths]
+        return left + mid.join(parts) + right
+
+    out: list[str] = []
+    out.append(c(sep("┌", "┬", "┐", "─"), "grey"))
+    header_row = c("│", "grey") + c("│", "grey").join(
+        " " + c(pad(truncate(h, w), w), "bold") + " " for h, w in zip(headers, widths)
+    ) + c("│", "grey")
+    out.append(header_row)
+    out.append(c(sep("├", "┼", "┤", "─"), "grey"))
+    for row in rows:
+        cells = []
+        for cell, w in zip(row, widths):
+            cells.append(" " + pad(truncate(cell, w), w) + " ")
+        out.append(c("│", "grey") + c("│", "grey").join(cells) + c("│", "grey"))
+    out.append(c(sep("└", "┴", "┘", "─"), "grey"))
+    return out
+
+
+def pause(msg: str = "press enter to continue") -> None:
+    try:
+        input(c(f"\n{msg} ", "dim"))
+    except EOFError:
+        pass
+
+
+def prompt(msg: str, default: str = "") -> str:
+    suffix = f" [{default}]" if default else ""
+    try:
+        val = input(c(f"{msg}{suffix}: ", "yellow")).strip()
+    except EOFError:
+        return default
+    return val or default
+
+
+def confirm(msg: str, default: bool = False) -> bool:
+    yn = "Y/n" if default else "y/N"
+    val = prompt(f"{msg} ({yn})").lower()
+    if not val:
+        return default
+    return val.startswith("y")
+
+
+# --- TUI screens --------------------------------------------------------------
+
+def tui_header(width: int) -> None:
+    title = "  projtool — personal multi-project dashboard  "
+    sys.stdout.write(c(pad(title, width, "center"), "bold", "bgblue") + "\n")
+
+
+def tui_status_lines(cfg: dict, projects: list[dict]) -> list[str]:
+    lines: list[str] = []
+    roots = cfg.get("roots") or []
+    if roots:
+        lines.append(c("roots: ", "dim") + c(", ".join(roots), "green"))
+    else:
+        lines.append(c("roots: ", "dim") + c("(none configured — press 1)", "red"))
+
+    if projects:
+        cats: dict[str, int] = {}
+        for r in projects:
+            cats[r.get("category", "other")] = cats.get(r.get("category", "other"), 0) + 1
+        cats_str = " · ".join(f"{k} {v}" for k, v in sorted(cats.items(), key=lambda kv: -kv[1]))
+        lines.append(c("inventory: ", "dim") + c(f"{len(projects)} projects", "green") +
+                     c(f"   ({cats_str})", "grey"))
+
+        # Stacks breakdown
+        stacks: dict[str, int] = {}
+        for r in projects:
+            for s in r.get("stacks") or []:
+                stacks[s] = stacks.get(s, 0) + 1
+        if stacks:
+            top = sorted(stacks.items(), key=lambda kv: -kv[1])[:6]
+            lines.append(c("stacks: ", "dim") + " · ".join(f"{k} {v}" for k, v in top))
+
+        # Health summary (across all projects)
+        hstats = {"ok": 0, "fail": 0, "skipped": 0, "none": 0}
+        for r in projects:
+            h = r.get("health")
+            if not h:
+                hstats["none"] += 1
+                continue
+            for k in ("install", "build", "test", "lint"):
+                v = h.get(k)
+                if v in hstats:
+                    hstats[v] += 1
+        checked = sum(1 for r in projects if r.get("health"))
+        lines.append(c("health: ", "dim") +
+                     c(f"{hstats['ok']} ok", "green") + " · " +
+                     c(f"{hstats['fail']} fail", "red") + " · " +
+                     c(f"{hstats['skipped']} skipped", "grey") +
+                     c(f"   ({checked}/{len(projects)} projects checked)", "grey"))
+    else:
+        lines.append(c("inventory: ", "dim") + c("(empty — press 2 to scan)", "red"))
+    return lines
+
+
+MENU_ITEMS = [
+    ("1", "configure", "Configure project roots"),
+    ("2", "scan",      "Scan projects (read-only)"),
+    ("3", "browse",    "Browse inventory (table view)"),
+    ("4", "report",    "Render inventory.md + dashboard.html"),
+    ("5", "health",    "Run health checks (install/build/test/lint)"),
+    ("6", "deps",      "Check outdated dependencies"),
+    ("7", "tidy",      "Flag archival candidates"),
+    ("8", "tag",       "Tag a project"),
+    ("9", "open",      "Open HTML dashboard in browser"),
+    ("q", "quit",      "Quit"),
+]
+
+
+def tui_draw_menu() -> None:
+    print(c("\n  what do you want to do?\n", "bold"))
+    for key, _name, desc in MENU_ITEMS:
+        print(f"   {c(key, 'yellow', 'bold')})  {desc}")
+    print()
+
+
+def tui_main() -> int:
+    ansi_enable_windows()
+    first_run = True
+    while True:
+        cfg = load_config()
+        projects = load_inventory()
+        width, _height = term_size()
+
+        clear()
+        tui_header(width)
+        print()
+        for line in box("status", tui_status_lines(cfg, projects), width - 2):
+            print(line)
+        tui_draw_menu()
+
+        # First-run nudge: if no roots, jump straight to configure.
+        if first_run and not cfg.get("roots"):
+            first_run = False
+            print(c("  (no roots configured yet — let's set one up)\n", "yellow"))
+            tui_configure()
+            continue
+        first_run = False
+
+        choice = prompt("choose", "q").lower()
+        action = None
+        for key, name, _ in MENU_ITEMS:
+            if choice == key or choice == name:
+                action = name
+                break
+        if action == "quit":
+            print(c("\nbye!\n", "dim"))
+            return 0
+        if action == "configure":
+            tui_configure()
+        elif action == "scan":
+            tui_scan()
+        elif action == "browse":
+            tui_browse()
+        elif action == "report":
+            tui_report()
+        elif action == "health":
+            tui_health()
+        elif action == "deps":
+            tui_deps()
+        elif action == "tidy":
+            tui_tidy()
+        elif action == "tag":
+            tui_tag()
+        elif action == "open":
+            tui_open()
+        else:
+            print(c(f"  unknown choice: {choice!r}", "red"))
+            pause()
+
+
+def tui_configure() -> None:
+    cfg = load_config()
+    while True:
+        clear()
+        width, _ = term_size()
+        tui_header(width)
+        print()
+        lines = []
+        roots = cfg.get("roots") or []
+        if roots:
+            for i, r in enumerate(roots, 1):
+                exists = Path(r).expanduser().exists()
+                marker = c("✓", "green") if exists else c("✗ missing", "red")
+                lines.append(f"{i}. {r}  {marker}")
+        else:
+            lines.append(c("(no roots yet)", "dim"))
+        lines.append("")
+        lines.append(f"archive_after_days: {cfg.get('archive_after_days', 730)}")
+        lines.append(f"excludes: {', '.join(cfg.get('exclude_dirs', [])[:6])}…")
+        for line in box("configuration", lines, width - 2):
+            print(line)
+        print()
+        print("   " + c("a", "yellow") + ") add a root folder")
+        print("   " + c("r", "yellow") + ") remove a root folder")
+        print("   " + c("d", "yellow") + ") change archive_after_days")
+        print("   " + c("b", "yellow") + ") back to main menu")
+        choice = prompt("choose", "b").lower()
+        if choice == "b":
+            return
+        if choice == "a":
+            raw = prompt("folder path")
+            if not raw:
+                continue
+            path = Path(raw).expanduser().resolve()
+            if not path.exists():
+                if not confirm(f"{path} does not exist; add anyway?", False):
+                    continue
+            cfg.setdefault("roots", []).append(str(path))
+            save_config(cfg)
+            print(c(f"  added {path}", "green"))
+            pause()
+        elif choice == "r":
+            if not cfg.get("roots"):
+                pause("nothing to remove — enter to go back")
+                continue
+            idx_s = prompt("number to remove")
+            try:
+                idx = int(idx_s) - 1
+                removed = cfg["roots"].pop(idx)
+                save_config(cfg)
+                print(c(f"  removed {removed}", "yellow"))
+            except (ValueError, IndexError):
+                print(c("  invalid index", "red"))
+            pause()
+        elif choice == "d":
+            val = prompt("archive_after_days", str(cfg.get("archive_after_days", 730)))
+            try:
+                cfg["archive_after_days"] = int(val)
+                save_config(cfg)
+            except ValueError:
+                print(c("  not a number", "red"))
+                pause()
+
+
+def tui_scan() -> None:
+    clear()
+    width, _ = term_size()
+    tui_header(width)
+    print()
+    cfg = load_config()
+    if not cfg.get("roots"):
+        print(c("  no roots configured — use (1) configure first", "red"))
+        pause()
+        return
+    print(c("  scanning… (this is read-only)\n", "dim"))
+    projects = scan(cfg)
+    save_inventory(projects)
+    print(c(f"  ✓ scanned {len(projects)} projects", "green"))
+    print(c(f"    wrote {INVENTORY_PATH}", "grey"))
+    pause()
+
+
+def tui_report() -> None:
+    clear()
+    width, _ = term_size()
+    tui_header(width)
+    print()
+    projects = load_inventory()
+    if not projects:
+        print(c("  no inventory — run (2) scan first", "red"))
+        pause()
+        return
+    write_text(MD_PATH, render_markdown(projects))
+    write_text(HTML_PATH, render_html(projects))
+    print(c(f"  ✓ wrote {MD_PATH}", "green"))
+    print(c(f"  ✓ wrote {HTML_PATH}", "green"))
+    pause()
+
+
+def _glyph_colored(health: dict | None, key: str) -> str:
+    if not health:
+        return c("–", "grey")
+    v = health.get(key)
+    if v == "ok":
+        return c("✓", "green")
+    if v == "fail":
+        return c("✗", "red")
+    return c("–", "grey")
+
+
+def tui_browse() -> None:
+    projects = load_inventory()
+    if not projects:
+        clear()
+        print(c("  no inventory — run (2) scan first", "red"))
+        pause()
+        return
+
+    filter_cat: str | None = None
+    query: str = ""
+    page = 0
+    PAGE_SIZE = 20
+
+    while True:
+        clear()
+        width, height = term_size()
+        tui_header(width)
+
+        # Filter + search
+        filtered = projects
+        if filter_cat:
+            filtered = [r for r in filtered if r.get("category") == filter_cat]
+        if query:
+            q = query.lower()
+            def match(r: dict) -> bool:
+                hay = " ".join([
+                    r.get("name", ""), r.get("category", ""),
+                    " ".join(r.get("stacks") or []),
+                    " ".join(r.get("tags") or []),
+                    r.get("readme", "") or "",
+                ]).lower()
+                return q in hay
+            filtered = [r for r in filtered if match(r)]
+
+        filtered = sorted(
+            filtered,
+            key=lambda r: ((r.get("git") or {}).get("last_commit") or ""),
+            reverse=True,
+        )
+
+        # Pagination
+        total = len(filtered)
+        pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+        page = max(0, min(page, pages - 1))
+        start = page * PAGE_SIZE
+        window = filtered[start : start + PAGE_SIZE]
+
+        # Column widths: name, cat, stacks, last, MB, IBTL, tags
+        col_name = 28
+        col_cat = 10
+        col_stacks = 18
+        col_last = 10
+        col_size = 6
+        col_health = 9
+        col_tags = max(10, width - (col_name + col_cat + col_stacks + col_last + col_size + col_health + 16))
+
+        headers = ["name", "cat", "stacks", "last", "MB", "I B T L", "tags"]
+        widths = [col_name, col_cat, col_stacks, col_last, col_size, col_health, col_tags]
+
+        rows: list[list[str]] = []
+        for r in window:
+            last = (r.get("git") or {}).get("last_commit") or "–"
+            h = r.get("health")
+            hb = " ".join([
+                _glyph_colored(h, "install"),
+                _glyph_colored(h, "build"),
+                _glyph_colored(h, "test"),
+                _glyph_colored(h, "lint"),
+            ])
+            rows.append([
+                r.get("name", ""),
+                r.get("category", "") or "",
+                ", ".join(r.get("stacks") or []),
+                last,
+                f"{r.get('size_mb', 0)}",
+                hb,
+                ", ".join(r.get("tags") or []),
+            ])
+
+        status_line = (
+            c(f"showing {start + 1}–{start + len(window)} of {total}", "dim") +
+            (c(f"  · category={filter_cat}", "cyan") if filter_cat else "") +
+            (c(f"  · q={query!r}", "cyan") if query else "") +
+            c(f"   page {page + 1}/{pages}", "grey")
+        )
+        print()
+        print("  " + status_line)
+        print()
+        for line in table(headers, rows, widths):
+            print("  " + line)
+
+        print()
+        print("  " + c("n", "yellow") + ") next  " +
+              c("p", "yellow") + ") prev  " +
+              c("f", "yellow") + ") filter category  " +
+              c("/", "yellow") + ") search  " +
+              c("c", "yellow") + ") clear filters")
+        print("  " + c("#", "yellow") + ") view details by row number  " +
+              c("b", "yellow") + ") back")
+        choice = prompt("choose", "b").lower()
+
+        if choice == "b" or choice == "":
+            return
+        if choice == "n":
+            page += 1
+        elif choice == "p":
+            page -= 1
+        elif choice == "c":
+            filter_cat = None
+            query = ""
+            page = 0
+        elif choice == "f":
+            cats = sorted(set(r.get("category") or "other" for r in projects))
+            print(c("  categories: " + ", ".join(cats), "cyan"))
+            pick = prompt("category (blank to clear)")
+            filter_cat = pick or None
+            page = 0
+        elif choice == "/":
+            query = prompt("search")
+            page = 0
+        elif choice.isdigit():
+            idx = int(choice) - 1
+            if 0 <= idx < len(window):
+                tui_detail(window[idx])
+            else:
+                print(c("  out of range", "red"))
+                pause()
+
+
+def tui_detail(rec: dict) -> None:
+    clear()
+    width, _ = term_size()
+    tui_header(width)
+    print()
+    git = rec.get("git") or {}
+    h = rec.get("health") or {}
+    lines = [
+        c(rec["name"], "bold"),
+        c(rec["path"], "grey"),
+        "",
+        f"category:   {rec.get('category', '') }",
+        f"stacks:     {', '.join(rec.get('stacks') or [])}",
+        f"frameworks: {', '.join(rec.get('frameworks') or []) or '–'}",
+        f"tags:       {', '.join(rec.get('tags') or []) or '–'}",
+        f"size:       {rec.get('size_mb', 0)} MB",
+        "",
+        f"git:        branch={git.get('branch') or '–'}  "
+        f"last={git.get('last_commit') or '–'}  "
+        f"dirty={git.get('dirty')}  commits={git.get('commit_count') or '–'}",
+    ]
+    if h:
+        lines.append("")
+        lines.append(
+            "health:     " +
+            f"install={h.get('install')}  "
+            f"build={h.get('build')}  "
+            f"test={h.get('test')}  "
+            f"lint={h.get('lint')}"
+        )
+    if rec.get("readme"):
+        lines.append("")
+        lines.append("readme:")
+        lines.append("  " + (rec.get("readme") or ""))
+    log_path = HEALTH_DIR / f"{rec['name']}.log"
+    if log_path.exists():
+        lines.append("")
+        lines.append(c(f"health log: {log_path}", "grey"))
+    for line in box(rec["name"], lines, width - 2):
+        print(line)
+    pause()
+
+
+def tui_health() -> None:
+    clear()
+    width, _ = term_size()
+    tui_header(width)
+    print()
+    projects = load_inventory()
+    if not projects:
+        print(c("  no inventory — run (2) scan first", "red"))
+        pause()
+        return
+
+    print(c("  health checks run install/build/test/lint per project.", "dim"))
+    print(c("  by default it only prints the plan (dry-run).", "dim"))
+    print()
+    name = prompt("project name (blank for all)")
+    do_run = confirm("actually execute the commands? (otherwise dry-run)", False)
+    print()
+    count = 0
+    for rec in projects:
+        if name and rec["name"] != name:
+            continue
+        print(c(f"== {rec['name']}", "bold"))
+        rec["health"] = run_health(rec, do_run=do_run)
+        count += 1
+    save_inventory(projects)
+    print()
+    print(c(f"  ✓ processed {count} project(s)", "green"))
+    pause()
+
+
+def tui_deps() -> None:
+    clear()
+    width, _ = term_size()
+    tui_header(width)
+    print()
+    projects = load_inventory()
+    if not projects:
+        print(c("  no inventory — run (2) scan first", "red"))
+        pause()
+        return
+    name = prompt("project name (blank for all)")
+    for rec in projects:
+        if name and rec["name"] != name:
+            continue
+        data = check_outdated(rec)
+        rec["deps_outdated"] = data
+        print(c(f"== {rec['name']}", "bold"))
+        if not data:
+            print(c("  no data", "grey"))
+            continue
+        for mgr, pkgs in data.items():
+            if not pkgs:
+                print(f"  {mgr}: " + c("up to date", "green"))
+                continue
+            print(f"  {mgr}: " + c(f"{len(pkgs)} outdated", "yellow"))
+            for pkg, v in list(pkgs.items())[:10]:
+                print(f"    {pkg:30s} {v.get('current')} -> {v.get('latest')}")
+    save_inventory(projects)
+    pause()
+
+
+def tui_tidy() -> None:
+    clear()
+    width, _ = term_size()
+    tui_header(width)
+    print()
+    cfg = load_config()
+    projects = load_inventory()
+    if not projects:
+        print(c("  no inventory — run (2) scan first", "red"))
+        pause()
+        return
+
+    threshold_days = cfg.get("archive_after_days", 730)
+    now = dt.datetime.now(dt.timezone.utc)
+    flagged: list[dict] = []
+    for rec in projects:
+        if rec.get("category") == "meta":
+            continue
+        git = rec.get("git") or {}
+        last = git.get("last_commit_iso")
+        stale = False
+        if last:
+            try:
+                d = dt.datetime.fromisoformat(last.replace("Z", "+00:00"))
+                stale = (now - d).days >= threshold_days
+            except ValueError:
+                pass
+        else:
+            stale = True
+        health = rec.get("health") or {}
+        broken = all(
+            v in (None, "skipped", "fail")
+            for k, v in health.items() if k != "checked_at"
+        ) if health else True
+        tiny_or_no_readme = rec.get("size_mb", 0) < 1 or not rec.get("has_readme")
+        if stale and broken and tiny_or_no_readme:
+            flagged.append(rec)
+
+    if not flagged:
+        print(c("  nothing flagged for archival", "green"))
+        pause()
+        return
+
+    rows = [
+        [r["name"], (r.get("git") or {}).get("last_commit") or "–", f"{r.get('size_mb', 0)}"]
+        for r in flagged
+    ]
+    for line in table(["name", "last commit", "MB"], rows, [40, 14, 8]):
+        print("  " + line)
+
+    print()
+    if not confirm(f"move these {len(flagged)} projects into a sibling _archive/ folder?", False):
+        print(c("  (dry-run only — nothing moved)", "dim"))
+        pause()
+        return
+    for rec in flagged:
+        src = Path(rec["path"])
+        dest = src.parent / "_archive" / src.name
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        if dest.exists():
+            print(c(f"  skip (exists): {dest}", "yellow"))
+            continue
+        print(c(f"  mv {src} -> {dest}", "yellow"))
+        shutil.move(str(src), str(dest))
+        rec["path"] = str(dest)
+        rec["tags"] = sorted(set((rec.get("tags") or []) + ["archived"]))
+    save_inventory(projects)
+    pause()
+
+
+def tui_tag() -> None:
+    clear()
+    width, _ = term_size()
+    tui_header(width)
+    print()
+    name = prompt("project name")
+    if not name:
+        return
+    tags_raw = prompt("tags (space-separated)")
+    tags = tags_raw.split()
+    if not tags:
+        print(c("  no tags given", "red"))
+        pause()
+        return
+    cfg = load_config()
+    entry = cfg.setdefault("overrides", {}).setdefault(name, {})
+    existing = set(entry.get("tags", []))
+    existing.update(tags)
+    entry["tags"] = sorted(existing)
+    save_config(cfg)
+    print(c(f"  ✓ {name}: tags = {entry['tags']}", "green"))
+    pause()
+
+
+def tui_open() -> None:
+    clear()
+    width, _ = term_size()
+    tui_header(width)
+    print()
+    if not HTML_PATH.exists():
+        print(c("  no dashboard.html yet — run (4) report first", "red"))
+        pause()
+        return
+    url = HTML_PATH.resolve().as_uri()
+    print(c(f"  dashboard:  {HTML_PATH}", "green"))
+    print(c(f"  url:        {url}", "green"))
+    try:
+        import webbrowser
+        if confirm("open in default browser now?", True):
+            webbrowser.open(url)
+    except Exception as e:  # pragma: no cover
+        print(c(f"  could not open browser: {e}", "red"))
+    pause()
+
+
+def cmd_tui(args: argparse.Namespace | None) -> None:
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    tui_main()
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="projtool", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    sub.add_parser("tui", help="interactive TUI (default when no args given)").set_defaults(func=cmd_tui)
     sub.add_parser("scan", help="walk roots, build out/inventory.json").set_defaults(func=cmd_scan)
     sub.add_parser("report", help="render inventory.md + dashboard.html").set_defaults(func=cmd_report)
 
@@ -834,9 +1547,14 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    OUT_DIR.mkdir(parents=True, exist_ok=True)
+    # No arguments -> launch the interactive TUI by default.
+    if not argv:
+        return cmd_tui(None) or 0
     parser = build_parser()
     args = parser.parse_args(argv)
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
     args.func(args)
     return 0
 
