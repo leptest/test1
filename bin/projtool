@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# POSIX wrapper for projtool. Forwards to python3.
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
+exec python3 "$DIR/projtool.py" "$@"

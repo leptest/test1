@@ -1,0 +1,38 @@
+{
+  "roots": [],
+  "exclude_dirs": [
+    "node_modules",
+    ".git",
+    "dist",
+    "build",
+    ".next",
+    ".nuxt",
+    "target",
+    "venv",
+    ".venv",
+    "__pycache__",
+    ".cache",
+    ".parcel-cache",
+    "out",
+    "coverage",
+    ".turbo"
+  ],
+  "archive_after_days": 730,
+  "overrides": {
+    "_bitbucket": {
+      "category": "meta"
+    },
+    "_bruno": {
+      "category": "meta"
+    },
+    "_design-files": {
+      "category": "meta"
+    },
+    "_other": {
+      "category": "meta"
+    },
+    "_WEBSITES": {
+      "category": "meta"
+    }
+  }
+}
