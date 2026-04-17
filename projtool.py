@@ -152,7 +152,8 @@ def detect_stack(project: Path) -> tuple[list[str], list[str]]:
 
     if (project / "pyproject.toml").exists() or \
        (project / "requirements.txt").exists() or \
-       (project / "setup.py").exists():
+       (project / "setup.py").exists() or \
+       _count_files(project, (".py",), limit=4) >= 3:
         stacks.append("python")
 
     if (project / "Cargo.toml").exists():
@@ -211,19 +212,59 @@ def detect_category(name: str, stacks: list[str]) -> str:
 #  Git info
 # --------------------------------------------------------------------------- #
 
+def _kill_tree(pid: int) -> None:
+    # On Windows, npm.CMD/yarn.CMD spawn node children that survive Popen.kill().
+    # Walk the parent-PID tree via taskkill; on POSIX use the session group.
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+        except Exception:
+            pass
+    else:
+        import signal
+        try:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+
 def _run(cmd: list[str], cwd: Path | None = None, timeout: int = 30) -> tuple[int, str]:
+    popen_kwargs: dict = {}
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
     try:
-        proc = subprocess.run(
-            cmd, cwd=str(cwd) if cwd else None, capture_output=True,
-            text=True, timeout=timeout, shell=False,
+        proc = subprocess.Popen(
+            cmd, cwd=str(cwd) if cwd else None,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
+            shell=False, **popen_kwargs,
         )
-        return proc.returncode, (proc.stdout or "") + (proc.stderr or "")
     except FileNotFoundError:
         return 127, f"not found: {cmd[0]}"
-    except subprocess.TimeoutExpired:
-        return 124, "timeout"
     except Exception as e:  # pragma: no cover
         return 1, repr(e)
+
+    try:
+        out, _ = proc.communicate(timeout=timeout)
+        return proc.returncode, out or ""
+    except subprocess.TimeoutExpired:
+        _kill_tree(proc.pid)
+        try:
+            out, _ = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            out = ""
+        return 124, (out or "") + "\n[timeout]"
 
 
 def git_info(project: Path) -> dict:
@@ -416,12 +457,18 @@ def run_health(rec: dict, do_run: bool) -> dict:
 
     for step, argv in plan:
         lines.append(f"\n$ {' '.join(argv)}\n")
+        print(f"  {rec['name']:40s} {step:8s} running...", end="", flush=True)
         rc, out = _run(argv, cwd=project, timeout=HEALTH_TIMEOUT_SECONDS)
         tail = "\n".join(out.splitlines()[-200:])
         lines.append(tail + "\n")
         lines.append(f"[exit {rc}]\n")
-        result[step] = "ok" if rc == 0 else "fail"
-        print(f"  {rec['name']:40s} {step:8s} {result[step]}")
+        if rc == 0:
+            result[step] = "ok"
+        elif rc == 124:
+            result[step] = "timeout"
+        else:
+            result[step] = "fail"
+        print(f"\r  {rec['name']:40s} {step:8s} {result[step]:12s}")
 
     write_text(log_path, "".join(lines))
     return result

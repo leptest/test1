@@ -1,5 +1,7 @@
 {
-  "roots": [],
+  "roots": [
+    "C:\\Github"
+  ],
   "exclude_dirs": [
     "node_modules",
     ".git",
